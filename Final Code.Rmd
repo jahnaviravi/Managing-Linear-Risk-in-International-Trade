@@ -1,0 +1,246 @@
+---
+title: "Managing Linear Risk"
+author: "Jahnavi Ravi"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r, message=FALSE}
+library(quantmod)
+```
+
+# 1. Let St denote the GBP/USD exchange rate, i.e. the amount of dollars needed to purchase a single GBP at time t. Under no-arbitrage pricing (risk-neutral valuation), St follows a Geometric Brownian Motion (GBM), such that the future spot price is given by
+
+## (a) For theta, you need to refer to the interest rate parity and estimate theta using the forward quotes from Table 1. Note that this a “forward-looking” approach.
+
+We calculate the mid-point of bid-ask spreads for each forward contract and use the interest rate parity formula to estimate theta.
+
+```{r}
+# Load the forward prices data
+forward_data <- read.csv("FE535_Forward_Prices.csv")
+
+# Extract relevant information
+bid_rates <- forward_data$Bid
+ask_rates <- forward_data$Ask
+time_to_maturity <- c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12) / 12
+
+# Forward rates using mid-point of bid and ask prices
+forward_rates <- (bid_rates + ask_rates) / 2
+
+# Calculate theta for all forward contracts
+theta_values <- log(forward_rates / 1.2273) / time_to_maturity/100
+
+theta_data <- data.frame(Time_to_Maturity = time_to_maturity * 12,  # in months
+                          Forward_Rate = forward_rates,
+                          Int_rate_diff_pcnt = theta_values)
+
+print(theta_data)
+
+# Average theta values
+calibrated_theta = mean(theta_values)
+print(paste("Calibrated theta:", calibrated_theta))
+```
+
+## (b) For foreign exchange rates, it is common to relate to the interbank lending rate in terms risk-free rate. In particular the data file named FE535_Libor_USD_GBP.csv contains LIBOR rates for both USD and GBP. How does your calibrated theta compare with LIBOR rates? 
+
+```{r}
+# Load LIBOR rates data
+libor_data <- read.csv("FE535_Libor_USD_GBP.csv")
+
+# Extract relevant LIBOR rates
+usd_1m_libor <- libor_data$US0001M.Index/ 100
+gbp_1m_libor <- libor_data$BP0001M.Index/ 100
+usd_3m_libor <- libor_data$US0003M.Index/ 100
+gbp_3m_libor <- libor_data$BP0003M.Index/ 100
+usd_6m_libor <- libor_data$US0006M.Index/ 100
+gbp_6m_libor <- libor_data$BP0006M.Index/ 100
+
+diff_1m <- mean(usd_1m_libor - gbp_1m_libor)
+diff_3m <- mean(usd_3m_libor - gbp_3m_libor)
+diff_6m <- mean(usd_6m_libor - gbp_6m_libor)
+
+libor_data1 <- data.frame(Month = c("1M", "3M", "6M"),
+                               USD_LIBOR = c(mean(usd_1m_libor), mean(usd_3m_libor), mean(usd_6m_libor)),
+                               GBP_LIBOR = c(mean(gbp_1m_libor), mean(gbp_3m_libor), mean(gbp_6m_libor)),
+                               Diff_USD_GBP_LIBOR = c(diff_1m, diff_3m, diff_6m))
+
+libor_data1
+```
+
+```{r}
+# Compare the two sets of theta values
+comparison_data <- data.frame(Month = c("1M", "3M", "6M"),
+                              Calib_Theta = c(theta_values[1], theta_values[3], theta_values[6]),
+                              Diff_USD_GBP_LIBOR = libor_data1$Diff_USD_GBP_LIBOR)
+
+print("Comparison of Theta from Forward Rates and Calibrated Theta from LIBOR Rates:")
+print(comparison_data)
+```
+
+## (c) For sigma, you need to download data for the daily GBP/USD exchange rate using the “GB- PUSD=X” symbol from Yahoo Finance. Your data should be daily and range between 2018-01-01 and 2022-04-03. Given the adjusted prices, you need to calibrate sigma using the historical returns. Note that this calibration is backward-looking, which is in line with what you did in Project 1.
+
+
+```{r, warning=FALSE}
+# Download historical GBP/USD exchange rate data
+start_date <- "2018-01-01"
+end_date <- "2022-04-03"
+symbol <- na.omit("GBPUSD=X")
+
+exchange_rate_data <- na.omit(getSymbols(symbol, src = "yahoo", from = start_date, to = end_date, auto.assign = FALSE))
+exchange_rate <- Ad(exchange_rate_data)
+
+# Calculate daily returns
+returns <- na.omit(diff(log(exchange_rate)))
+
+# Calculate volatility
+sigma <- sd(returns) * sqrt(252)
+
+cat("Calibrated Sigma (Volatility):", sigma, "\n")
+```
+
+# 2. Assume that the exporter does not hedge the exchange rate risk. In this case, the exporter exchanges the GBP on the spot market upon receiving the payment in the future. Let VT denote the profit/loss (P&L) of the exporter at delivery time.
+
+To calculate the 99% Value at Risk (VaR) of the exporter's profit/loss (P&L) in dollars ($), we can use a Monte Carlo simulation.
+
+```{r}
+set.seed(7)
+S0 = 1.2273
+theta = 0.0535988141263977
+sigma = 0.08552515
+dt = 1/252
+periods = 126
+drift = (theta - (sigma^2)/2)
+N = 10^3
+
+gbm = function(n) {
+  rseq = rnorm(periods, drift * dt, sigma * sqrt(dt))
+  ST = S0 * exp(c(0, cumsum(rseq)))
+  return(ST)
+}
+
+# Simulating N paths of future spot rates
+smat = sapply(1:N, gbm)
+
+# True and simulated mean spot rates
+data.frame(True = S0 * exp(-0.002639483 * 0.5), Simulated = mean(smat[nrow(smat),]))
+
+# True and simulated variances
+data.frame(True_Variance = (S0^2) * (exp(0.5 * sigma^2) - 1) * exp(2 * 0.5 * -0.002639483),
+           Sim_Variance = var(smat[nrow(smat),]))
+
+# VaR calculation
+s_end = smat[nrow(smat),]
+avg_s = mean(s_end)
+sd_s = sd(s_end)
+q_s = quantile((s_end), 0.01)
+VaR_0.99_unhedged = avg_s - q_s
+VaR_0.99_USD_unhedged = VaR_0.99_unhedged * 1250000
+cat("99% Value at Risk (VaR) in $:", VaR_0.99_USD_unhedged, "\n")
+```
+
+# 3. Consider a unitary hedge, in which the exporter shorts 20 futures contracts today and closes the position when the GBP payment is received. If the risk-free rates are fixed and there is no arbitrage, the price of the futures contract should obey to the interest rate parity. In other words, the futures contract price at time t is given by Ft = St * e(r-rf )*(tm-t), with tm denoting the maturity time of the futures contract. Assume that there is no transactions cost, i.e. you are able to buy and sell futures contract with respect to the price implied by the interest rate parity. Using a MC simulation, address the following:
+
+## (a) Suppose you use the futures contract expiring in Dec 2024. What is the 99% VaR of the P&L with unitary hedging?
+
+```{r}
+# Calculating new period:
+current_date <- as.Date("2023-11-13")
+maturity_date <- as.Date("2024-12-31")  # Assuming the last day of December 2024
+
+tm <- as.numeric(difftime(maturity_date, current_date, units = "days")) / 365
+
+print(paste("Time to maturity (tm):", tm))
+```
+
+
+```{r, warning=FALSE}
+tm <- 1.134
+theta <- 0.0535988141263977
+smat <- smat
+
+# P&L calculation
+f <- matrix(, nrow = 127, ncol = 1000)
+for (i in 0:126) {
+  f[i + 1, ] <- smat[i + 1, ] * exp(theta * (tm - (i * (1/252))))
+}
+pnl_hedged <- f[127, ] - smat[127, ]
+
+cat("Head of pnl_hedged:\n")
+print(head(pnl_hedged))
+
+cat("Tail of pnl_hedged:\n")
+print(tail(pnl_hedged))
+
+pnl_hedged <- pnl_hedged[!is.na(pnl_hedged)]
+
+avg_pnl_hedged <- mean(pnl_hedged)
+sd_pnl_hedged <- sd(pnl_hedged)
+q_pnl_hedged <- quantile(pnl_hedged, 0.01, na.rm = TRUE)
+
+# Calculate VaR at 99%
+VaR_0.99_hedged <- avg_pnl_hedged - q_pnl_hedged
+VaR_0.99_USD_hedged <- VaR_0.99_hedged * 1250000
+
+cat("Average P&L with unitary hedging:", avg_pnl_hedged, "\n")
+cat("Standard Deviation of P&L with unitary hedging:", sd_pnl_hedged, "\n")
+cat("99% VaR of P&L with unitary hedging:", VaR_0.99_hedged, "\n")
+cat("99% VaR of P&L with unitary hedging in USD:", VaR_0.99_USD_hedged, "\n")
+```
+## (b) Suppose instead you use the futures contract expiring in Sep 2024 (before delivery). What is the 99% VaR of the P&L now? (10 Points)
+
+```{r}
+# Calculating new period: 
+delivery_date <- as.Date("2024-10-01")
+expiration_date <- as.Date("2024-09-30")
+new_period <- as.numeric(difftime(delivery_date, expiration_date, units = "days"))
+cat("New Period (days):", new_period, "\n")
+```
+
+
+```{r}
+new_period <- 1
+new_S_0 <- mean(smat[115,])
+
+# Function to simulate spot rates
+new_gbm <- function(n) {
+  new_rseq <- rnorm(new_period, drift * dt, sigma * sqrt(dt))
+  new_ST <- new_S_0 * exp(c(0, cumsum(new_rseq)))
+  return(new_ST)
+}
+
+new_smat <- sapply(1:1000, new_gbm)
+
+new_spot_rates <- new_smat[2, ]
+
+# Calculate 99% VaR
+new_VaR_0.99 <- mean(new_spot_rates) - quantile(new_spot_rates, 0.01)
+new_VaR_USD <- new_VaR_0.99 * 1250000
+
+cat("99% VaR for the new period:", new_VaR_0.99, "\n")
+cat("99% VaR for the new period in USD:", new_VaR_USD, "\n")
+
+```
+
+## (c) How do justify the difference in VaR when comparing your response to Part 2, Part 3 (a), and Part (b). Elaborate in terms of basis risk. (10 Points)
+
+Part 2 VaR:
+Unhedged position
+99% VaR = $214,840
+
+Part 3(a) VaR:
+Hedged with Dec 2024 futures
+99% VaR = $7,321.64
+
+Part 3(b) VaR:
+Hedged with Sep 2024 futures
+99% VaR = $18,488.37
+
+Key observations:
+
+Unhedged VaR is very high - exposed to full FX movements
+Dec 2024 hedge minimizes risk significantly due to matched maturity
+Sep 2024 hedge has higher VaR than Dec 2024 hedge due to basis risk between hedge and underlying cash flows
+
+In summary, the results illustrate that hedging reduces risk but some basis risk can remain depending on hedge contract's maturity. The Dec 2024 futures matches the timing perfectly and eliminates almost all risk.
